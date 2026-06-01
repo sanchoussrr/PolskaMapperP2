@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Польша — 3D карта (360°)</title>
+    
+    <script src="https://unpkg.com/maplibre-gl@5.2.0/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@5.2.0/dist/maplibre-gl.css" rel="stylesheet" />
+    
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            width: 100vw; height: 100vh; overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #000;
+        }
+
+        #map { width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
+
+        .loading-screen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; z-index: 2000;
+            transition: opacity 0.4s ease, visibility 0.4s ease;
+        }
+        .loading-screen--hidden { opacity: 0; visibility: hidden; }
+        .loading-logo {
+            font-size: 32px; font-weight: 700; color: #fff;
+            margin-bottom: 20px; letter-spacing: -1px;
+        }
+        .loading-progress {
+            width: 200px; height: 3px; background: #333;
+            border-radius: 2px; overflow: hidden;
+        }
+        .loading-progress__bar {
+            height: 100%; width: 0%; background: #fff;
+            border-radius: 2px; transition: width 0.3s ease;
+        }
+
+        .reset-btn {
+            position: fixed; top: 20px; right: 20px; width: 44px; height: 44px;
+            background: rgba(0,0,0,0.85); backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.15); border-radius: 10px;
+            cursor: pointer; z-index: 100; display: flex; align-items: center;
+            justify-content: center; color: #fff; transition: all 0.2s ease;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.8);
+        }
+        .reset-btn:hover { background: rgba(30,30,30,0.9); transform: scale(1.05); }
+        .reset-btn svg { width: 20px; height: 20px; }
+
+        .controls-hint {
+            position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.85); backdrop-filter: blur(16px);
+            color: rgba(255,255,255,0.6); padding: 10px 20px; border-radius: 24px;
+            font-size: 12px; z-index: 100; pointer-events: none;
+            opacity: 0.85; transition: opacity 0.3s ease;
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .controls-hint:hover { opacity: 0; }
+
+        @media (max-width: 768px) {
+            .reset-btn { top: 10px; right: 10px; width: 38px; height: 38px; }
+            .controls-hint { bottom: 30px; font-size: 10px; padding: 8px 16px; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="loading-screen" id="loadingScreen">
+        <div class="loading-logo">POLSKA MAPPER</div>
+        <div class="loading-progress"><div class="loading-progress__bar" id="loadingBar"></div></div>
+    </div>
+
+    <div id="map"></div>
+
+    <button class="reset-btn" id="resetBtn" title="Сбросить вид">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M1 4v6h6"/><path d="M3.5 15a9 9 0 1 0 2.1-8.7L1 10"/></svg>
+    </button>
+
+    <div class="controls-hint">
+        🖱️ Средняя кнопка мыши / ПКМ — вращение 360° &nbsp;|&nbsp; Пробел — авто-вращение
+    </div>
+
+    <script>
+        (function() {
+            'use strict';
+
+            const POLAND_CENTER = [19.4, 51.9];
+            const INITIAL_ZOOM = 6.2;
+            const INITIAL_PITCH = 55;
+            const INITIAL_BEARING = -15;
+
+            let map = null;
+            let isRotating = false;
+            let rotationFrameId = null;
+
+            const qs = s => document.querySelector(s);
+
+            function setLoading(pct) { const b = qs('#loadingBar'); if (b) b.style.width = pct + '%'; }
+            function hideLoading() {
+                setLoading(100);
+                setTimeout(() => { const s = qs('#loadingScreen'); if (s) s.classList.add('loading-screen--hidden'); }, 400);
+            }
+
+            function throttleRAF(cb) {
+                let last = 0;
+                return function(...args) {
+                    const now = performance.now();
+                    if (now - last >= 16) { last = now; cb.apply(this, args); }
+                };
+            }
+
+            // ─── 360° Rotation ───
+            function enableFullRotation() {
+                let dragging = false, lastX = 0;
+                map.on('mousedown', e => {
+                    if (e.originalEvent.button === 1 || e.originalEvent.button === 2) {
+                        e.preventDefault(); dragging = true; lastX = e.point.x;
+                        if (rotationFrameId) { cancelAnimationFrame(rotationFrameId); rotationFrameId = null; isRotating = false; }
+                    }
+                });
+                map.on('mousemove', throttleRAF(e => {
+                    if (dragging) {
+                        map.setBearing((map.getBearing() + (e.point.x - lastX) * 0.35) % 360);
+                        lastX = e.point.x;
+                    }
+                }));
+                map.on('mouseup', () => { dragging = false; });
+                document.addEventListener('keydown', e => { 
+                    if (e.code === 'Space' && document.activeElement === document.body) { 
+                        e.preventDefault(); toggleAutoRotation(); 
+                    } 
+                });
+            }
+
+            function toggleAutoRotation() {
+                if (rotationFrameId) { cancelAnimationFrame(rotationFrameId); rotationFrameId = null; isRotating = false; return; }
+                isRotating = true;
+                let lastTS = null;
+                (function loop(ts) {
+                    if (!isRotating) return;
+                    if (lastTS) map.setBearing((map.getBearing() + 0.15 * Math.min(ts - lastTS, 100) / 1000 * 30) % 360);
+                    lastTS = ts;
+                    rotationFrameId = requestAnimationFrame(loop);
+                })(performance.now());
+            }
+
+            // ─── ЧЁРНЫЕ ЗДАНИЯ ───
+            function add3DBuildings(srcName) {
+                if (map.getLayer('3d-buildings')) return;
+                const add = () => {
+                    try {
+                        map.addLayer({
+                            id: '3d-buildings',
+                            source: srcName,
+                            'source-layer': 'building',
+                            type: 'fill-extrusion',
+                            minzoom: 13,
+                            maxzoom: 18,
+                            filter: ['all', 
+                                ['!=', ['get','hide_3d'], true], 
+                                ['<=', ['get','render_height'], 120],
+                                ['>', ['get','render_height'], 0]
+                            ],
+                            paint: {
+                                'fill-extrusion-color': '#000000',
+                                'fill-extrusion-height': [
+                                    'interpolate',['linear'],['zoom'],
+                                    13, ['min',['get','render_height'],20],
+                                    14, ['min',['get','render_height'],40],
+                                    15, ['min',['get','render_height'],60],
+                                    16, ['get','render_height']
+                                ],
+                                'fill-extrusion-base': ['get','render_min_height'],
+                                'fill-extrusion-opacity': 1.0,
+                                'fill-extrusion-vertical-gradient': false
+                            }
+                        }, getFirstSymbolLayer());
+                        console.log('✅ Чёрные 3D-здания добавлены');
+                    } catch(e) { console.warn('Ошибка зданий:', e); }
+                };
+                map.loaded() ? add() : map.once('load', add);
+            }
+
+            function getFirstSymbolLayer() {
+                const layers = map.getStyle().layers || [];
+                for (let i = 0; i < layers.length; i++) {
+                    if (layers[i].type === 'symbol') return layers[i].id;
+                }
+                return undefined;
+            }
+
+            function getVectorSourceName() {
+                const sources = map.getStyle().sources;
+                if (sources['openmaptiles']?.type === 'vector') return 'openmaptiles';
+                if (sources['openfreemap']?.type === 'vector') return 'openfreemap';
+                for (const k in sources) if (sources[k].type === 'vector') return k;
+                return 'openmaptiles';
+            }
+
+            function fixCrookedModels(srcName) {
+                map.on('sourcedata', throttleRAF(e => {
+                    if (e.sourceId === srcName && e.sourceLayer === 'building') {
+                        try {
+                            if (map.style?._tiles) {
+                                Object.keys(map.style._tiles).forEach(id => {
+                                    const t = map.style._tiles[id];
+                                    if (t?.data && (!t.data.layers || t.data.layers.length === 0)) {
+                                        delete map.style._tiles[id];
+                                    }
+                                });
+                            }
+                        } catch(err) {}
+                    }
+                }));
+            }
+
+            function optimizeTileCache() {
+                setInterval(() => {
+                    if (map?.style?._tiles) {
+                        const tiles = map.style._tiles;
+                        const keys = Object.keys(tiles || {});
+                        if (keys.length > 300) {
+                            keys.slice(0, 100).forEach(id => {
+                                if (tiles[id]?.timeAdded && Date.now() - tiles[id].timeAdded > 60000) {
+                                    delete map.style._tiles[id];
+                                }
+                            });
+                        }
+                    }
+                }, 30000);
+            }
+
+            // ─── Инициализация ───
+            function initMap() {
+                setLoading(20);
+                map = new maplibregl.Map({
+                    container: 'map',
+                    style: 'https://tiles.openfreemap.org/styles/liberty',
+                    center: POLAND_CENTER,
+                    zoom: INITIAL_ZOOM,
+                    pitch: INITIAL_PITCH,
+                    bearing: INITIAL_BEARING,
+                    antialias: true,
+                    maxBounds: [[10,47],[28,57]],
+                    minZoom: 4,
+                    maxZoom: 18,
+                    maxPitch: 80,
+                    fadeDuration: 0,
+                    preserveDrawingBuffer: false,
+                    pixelRatio: Math.min(window.devicePixelRatio, 2)
+                });
+                
+                setLoading(40);
+                
+                map.on('load', () => {
+                    setLoading(60);
+                    const src = getVectorSourceName();
+                    add3DBuildings(src);
+                    enableFullRotation();
+                    fixCrookedModels(src);
+                    setLoading(95);
+                    hideLoading();
+                    optimizeTileCache();
+                });
+                
+                map.on('error', e => { console.warn('Map error:', e.error || e); hideLoading(); });
+            }
+
+            function initResetButton() {
+                qs('#resetBtn')?.addEventListener('click', () => {
+                    map.flyTo({ 
+                        center: POLAND_CENTER, zoom: INITIAL_ZOOM, 
+                        pitch: INITIAL_PITCH, bearing: INITIAL_BEARING, duration: 2000 
+                    });
+                });
+            }
+
+            function boot() {
+                if (typeof maplibregl === 'undefined') { 
+                    console.error('MapLibre GL не загружен'); return; 
+                }
+                setLoading(10);
+                initMap();
+                initResetButton();
+            }
+
+            document.readyState === 'loading' 
+                ? document.addEventListener('DOMContentLoaded', boot) 
+                : boot();
+        })();
+    </script>
+</body>
+</html>
